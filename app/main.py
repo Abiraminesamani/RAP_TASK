@@ -2,6 +2,7 @@
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from ultralytics import RTDETR
 from PIL import Image
+from pathlib import Path
 import io
 
 
@@ -15,10 +16,10 @@ app = FastAPI(
     version="1.0.0"
 )
 
-MODEL_PATH = "/content/runs/ppe_rtdetr/weights/best.pt"
+MODEL_PATH = Path(__file__).resolve().parent.parent / "models" / "best.pt"
 
 # Load trained RT-DETR model
-model = RTDETR(MODEL_PATH)
+model = RTDETR(str(MODEL_PATH))
 
 # Confidence threshold for reasoning
 REASONING_CONFIDENCE = 0.50
