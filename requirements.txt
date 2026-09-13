@@ -6,3 +6,4 @@ pillow
 openai
 torch
 torchvision
+pytest
