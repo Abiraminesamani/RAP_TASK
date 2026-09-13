@@ -1,128 +1,129 @@
+# Technical Memo — Constrained Object Detection & Reasoning API
 
-# Construction PPE Detection & Reasoning API
+## 1. Domain and Objective
 
-## 1. Problem and Domain
+This project addresses **construction-site PPE compliance** using object detection and lightweight visual reasoning. The system detects PPE items and explicit non-compliance classes from construction images, exposes the detector through FastAPI, and answers natural-language questions using structured detection results.
 
-This project addresses construction-site safety by detecting personal protective equipment (PPE) from images. The objective is to identify workers and PPE objects and provide a simple reasoning interface for questions about the detected objects.
+The implementation uses **RT-DETR-L** fine-tuned on the Construction-PPE dataset and a single handwritten intent-routing layer. No multi-agent framework is used.
 
-The selected domain is useful because safety monitoring requires identifying both PPE presence and non-compliance cases.
+---
 
-## 2. Dataset
+## 2. Dataset and Labeling
 
-The Construction-PPE dataset was used for training and evaluation. The dataset contains multiple PPE and non-compliance classes including helmet, gloves, vest, boots, goggles, Person, no_helmet, no_goggle, no_gloves and no_boots.
+The project uses the official Ultralytics **Construction-PPE** dataset.
 
-The dataset provides separate training, validation and test splits.
+Source:
+https://docs.ultralytics.com/datasets/detect/construction-ppe
+
+The dataset contains **1,416 images** with YOLO-format bounding-box annotations:
+
+| Split | Images |
+|---|---:|
+| Train | 1,132 |
+| Validation | 143 |
+| Test | 141 |
+
+The 11 classes are:
+
+`helmet, gloves, vest, boots, goggles, none, Person, no_helmet, no_goggle, no_gloves, no_boots`
+
+The explicit PPE violation classes (`no_helmet`, `no_goggle`, `no_gloves`, `no_boots`) provide the required non-COCO detection component.
+
+The predefined train/validation/test split was retained rather than creating a new random split. This preserves the dataset's held-out test set for final evaluation.
+
+---
 
 ## 3. Model and Training
 
-RT-DETR-L was selected because it provides an end-to-end object detection architecture suitable for real-time-oriented detection.
+Model: **RT-DETR-L**
 
 Training configuration:
 
-- RT-DETR-L pretrained checkpoint
-- 30 epochs
-- Image size: 640
+- Epochs: 30
+- Image size: 640 × 640
 - Batch size: 4
-- NVIDIA Tesla T4 GPU
-- Early stopping patience: 8
+- Patience: 8
+- Workers: 2
+- Hardware: NVIDIA Tesla T4 GPU
+- Ultralytics: 8.4.149
+- PyTorch: 2.11.0+cu128
+- Python: 3.13.15
 
-The final trained checkpoint is stored as:
+The best trained checkpoint is stored as:
 
 `models/best.pt`
 
-## 4. Evaluation
+Training code: `training/train.py`
 
-Overall validation performance:
+Evaluation code: `training/evaluate.py`
 
-| Metric | Result |
+---
+
+## 4. Held-Out Test Results
+
+The final model was evaluated on the **141-image held-out test split**.
+
+| Metric | Test Result |
 |---|---:|
-| Precision | 0.640 |
-| Recall | 0.636 |
-| mAP@50 | 0.636 |
-| mAP@50-95 | 0.304 |
+| Precision | 62.41% |
+| Recall | 57.45% |
+| mAP@50 | 57.52% |
+| mAP@50-95 | 29.29% |
 
-Strong classes included Person, helmet, vest, gloves and boots.
+The test results are reported as the primary performance numbers rather than selecting the stronger validation result.
 
-Performance was weaker for rare non-compliance classes. This demonstrates that aggregate mAP does not fully describe model reliability.
+Performance is stronger for common classes such as `Person`, `helmet`, `vest`, `gloves`, `boots`, and `goggles`, while rare violation classes are substantially more difficult.
 
-## 5. Failure Cases
+### Confusion behavior
 
-Five major failure modes were identified:
+The main confusion behavior occurs around `none` and the rare PPE-violation classes. Small objects, occlusion, overlapping detections, and class imbalance contribute to these errors.
 
-1. Small PPE objects
-2. Occlusion
-3. Blur and low image quality
-4. Class confusion and overlapping detections
-5. Rare non-compliance classes / class imbalance
+The `no_boots` class is particularly difficult because it has very few validation examples.
 
-The likely root causes and mitigation strategies are documented in `failure_cases/README.md`.
+---
 
-## 6. Reasoning Layer
+## 5. Failure Cases and Root Causes
 
-The `/reason` endpoint contains a handwritten intent router.
+### 1. Small PPE objects
+Small helmets, gloves, goggles, or boots can be missed because the object occupies a small visual region after resizing.
 
-Questions such as:
+**Mitigation:** higher-resolution training, more small-object examples, and targeted augmentation.
 
-- "How many helmets are there?"
-- "How many people are there?"
-- "Are there safety vests?"
-- "Is anyone without a helmet?"
+### 2. Occlusion
+PPE partially hidden by people or other objects can be missed because only part of the visual evidence is visible.
 
-are routed to the detector.
+**Mitigation:** realistic occlusion examples and augmentation.
 
-The reasoning layer operates on structured detector outputs rather than directly guessing from the image.
+### 3. Blur / low image quality
+Blurred or low-resolution images remove important visual features.
 
-The system does not infer absence from a missing detection.
+**Mitigation:** include low-quality examples and blur-related augmentation.
 
-For example, if an explicit `no_helmet` detection is not found, the system can return:
+### 4. Class confusion / overlapping detections
+PPE objects can overlap or have visually similar regions, producing incorrect or duplicate-looking detections.
 
-"Insufficient information"
+**Mitigation:** inspect confusing examples, improve class balance, and tune confidence/NMS behavior.
 
-instead of claiming that everyone is wearing a helmet.
+### 5. Rare non-compliance classes
+`no_helmet`, `no_goggle`, `no_gloves`, and `no_boots` have weaker performance due to class imbalance and limited examples.
 
-## 7. API
+**Mitigation:** collect more violation examples, rebalance the data, and use targeted augmentation.
 
-### `/detect`
+Detailed analysis is available in `failure_cases/README.md`.
 
-Accepts an image and returns:
+---
 
-- class
-- confidence
-- bounding box
+## 6. Reasoning and Routing
 
-### `/reason`
+The `/reason` endpoint uses one **handwritten intent-routing layer**.
 
-Accepts:
+For example:
 
-- image
-- natural-language question
+`How many helmets are there?`
 
-and returns:
+is routed to the visual detector.
 
-- detected intent
-- reasoning result
-- detector evidence
+The detector produces structured evidence:
 
-## 8. Insufficient Information Example
-
-Question:
-
-"What is the weather?"
-
-Response:
-
-"Insufficient information: this question cannot be answered from the PPE detector."
-
-This prevents unsupported answers and demonstrates the confidence/knowledge boundary of the system.
-
-## 9. Reproducibility
-
-The repository contains:
-
-- training script
-- evaluation script
-- FastAPI implementation
-- requirements
-- model checkpoint
-- failure analysis
-- API examples
+```text
+class + confidence + bounding box
