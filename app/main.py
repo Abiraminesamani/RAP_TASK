@@ -1,4 +1,3 @@
-
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from ultralytics import RTDETR
 from PIL import Image
@@ -44,7 +43,7 @@ model = RTDETR(str(MODEL_PATH))
 # GPU if available, otherwise CPU
 DEVICE = 0 if torch.cuda.is_available() else "cpu"
 
-# Confidence threshold for reasoning
+# Confidence threshold used by reasoning
 REASONING_CONFIDENCE = 0.50
 
 
@@ -93,16 +92,18 @@ def run_detection(image):
 
             x1, y1, x2, y2 = box.xyxy[0].tolist()
 
-            detections.append({
-                "class": model.names[class_id],
-                "confidence": round(confidence, 3),
-                "bbox": [
-                    round(x1, 2),
-                    round(y1, 2),
-                    round(x2, 2),
-                    round(y2, 2)
-                ]
-            })
+            detections.append(
+                {
+                    "class": model.names[class_id],
+                    "confidence": round(confidence, 3),
+                    "bbox": [
+                        round(x1, 2),
+                        round(y1, 2),
+                        round(x2, 2),
+                        round(y2, 2)
+                    ]
+                }
+            )
 
     return detections
 
@@ -254,7 +255,7 @@ def deterministic_reasoning(question, detections):
     """
     Safe fallback reasoning.
 
-    This is used when:
+    Used when:
     - OpenAI is unavailable
     - OpenAI quota is exhausted
     - LLM call fails
@@ -280,7 +281,6 @@ def deterministic_reasoning(question, detections):
             "evidence": [],
             "source": "deterministic_guardrail"
         }
-
 
     # --------------------------------------------------------
     # PPE VIOLATION QUESTIONS
@@ -309,7 +309,8 @@ def deterministic_reasoning(question, detections):
         ):
 
             matching = [
-                d for d in reliable
+                d
+                for d in reliable
                 if d["class"] == violation_class
             ]
 
@@ -334,7 +335,6 @@ def deterministic_reasoning(question, detections):
                 "evidence": [],
                 "source": "deterministic_guardrail"
             }
-
 
     # --------------------------------------------------------
     # COUNT QUESTIONS
@@ -367,12 +367,12 @@ def deterministic_reasoning(question, detections):
             }
 
         matching = [
-            d for d in reliable
+            d
+            for d in reliable
             if d["class"] == target_class
         ]
 
-        # IMPORTANT:
-        # No detection is NOT proof of zero objects.
+        # No detection is NOT proof of zero objects
         if not matching:
 
             return {
@@ -387,15 +387,31 @@ def deterministic_reasoning(question, detections):
 
         readable_name = target_class.replace("_", " ")
 
+        # Grammar for goggles
+        if target_class == "goggles":
+
+            count = len(matching)
+
+            answer = (
+                f"I detected {count} pair"
+                f"{'s' if count != 1 else ''} of goggles."
+            )
+
+        else:
+
+            count = len(matching)
+
+            answer = (
+                f"I detected {count} "
+                f"{readable_name}"
+                f"{'s' if count != 1 else ''}."
+            )
+
         return {
-            "answer": (
-                f"I detected {len(matching)} "
-                f"{readable_name}."
-            ),
+            "answer": answer,
             "evidence": matching,
             "source": "deterministic_fallback"
         }
-
 
     # --------------------------------------------------------
     # PRESENCE QUESTIONS
@@ -427,7 +443,8 @@ def deterministic_reasoning(question, detections):
             }
 
         matching = [
-            d for d in reliable
+            d
+            for d in reliable
             if d["class"] == target_class
         ]
 
@@ -435,11 +452,26 @@ def deterministic_reasoning(question, detections):
 
         if matching:
 
+            count = len(matching)
+
+            # Special grammar for goggles
+            if target_class == "goggles":
+
+                answer = (
+                    f"Yes. I detected {count} pair"
+                    f"{'s' if count != 1 else ''} of goggles."
+                )
+
+            else:
+
+                answer = (
+                    f"Yes. I detected {count} "
+                    f"{readable_name}"
+                    f"{'s' if count != 1 else ''}."
+                )
+
             return {
-                "answer": (
-                    f"Yes. I detected {len(matching)} "
-                    f"{readable_name}."
-                ),
+                "answer": answer,
                 "evidence": matching,
                 "source": "deterministic_fallback"
             }
@@ -453,7 +485,6 @@ def deterministic_reasoning(question, detections):
             "evidence": [],
             "source": "deterministic_guardrail"
         }
-
 
     # --------------------------------------------------------
     # MOST COMMON OBJECT
@@ -501,7 +532,6 @@ def deterministic_reasoning(question, detections):
             "source": "deterministic_fallback"
         }
 
-
     # --------------------------------------------------------
     # GENERAL FALLBACK
     # --------------------------------------------------------
@@ -540,7 +570,6 @@ def reason_with_llm(question, detections):
             detections
         )
 
-
     # --------------------------------------------------------
     # STRUCTURED EVIDENCE
     # --------------------------------------------------------
@@ -553,7 +582,6 @@ def reason_with_llm(question, detections):
         }
         for detection in detections
     ]
-
 
     # --------------------------------------------------------
     # PROMPT
@@ -597,7 +625,6 @@ Rules:
 8. Keep the answer concise and in plain English.
 """
 
-
     # --------------------------------------------------------
     # CALL OPENAI
     # --------------------------------------------------------
@@ -624,7 +651,6 @@ Rules:
         # OpenAI quota / network / API errors
         # are handled safely by fallback reasoning.
         pass
-
 
     # --------------------------------------------------------
     # FALLBACK
@@ -671,7 +697,6 @@ async def detect(
             detail="Please upload an image file."
         )
 
-
     try:
 
         contents = await file.read()
@@ -689,7 +714,6 @@ async def detect(
             "detections": detections,
             "count": len(detections)
         }
-
 
     except Exception as error:
 
@@ -719,7 +743,6 @@ async def reason(
             detail="Please upload an image file."
         )
 
-
     try:
 
         # ====================================================
@@ -727,7 +750,6 @@ async def reason(
         # ====================================================
 
         intent = route_question(question)
-
 
         # ====================================================
         # STEP 2: UNSUPPORTED QUESTION
@@ -747,7 +769,6 @@ async def reason(
                 "reasoning_source": "handwritten_router"
             }
 
-
         # ====================================================
         # STEP 3: READ IMAGE
         # ====================================================
@@ -758,13 +779,11 @@ async def reason(
             io.BytesIO(contents)
         ).convert("RGB")
 
-
         # ====================================================
         # STEP 4: RT-DETR
         # ====================================================
 
         detections = run_detection(image)
-
 
         # ====================================================
         # STEP 5: CONFIDENCE GUARDRAIL
@@ -789,7 +808,6 @@ async def reason(
                 "reasoning_source": "confidence_guardrail"
             }
 
-
         # ====================================================
         # STEP 6: LLM + SAFE FALLBACK
         # ====================================================
@@ -798,7 +816,6 @@ async def reason(
             question,
             reliable_detections
         )
-
 
         # ====================================================
         # STEP 7: FINAL RESPONSE
@@ -812,7 +829,6 @@ async def reason(
             "detections_used": reasoning["evidence"],
             "reasoning_source": reasoning["source"]
         }
-
 
     except Exception as error:
 
