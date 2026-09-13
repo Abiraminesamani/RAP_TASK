@@ -1,7 +1,8 @@
-
-ultralytics==8.4.149
+ultralytics
 fastapi
 uvicorn
 python-multipart
 pillow
-requests
+openai
+torch
+torchvision

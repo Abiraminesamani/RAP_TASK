@@ -3,39 +3,80 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from ultralytics import RTDETR
 from PIL import Image
 from pathlib import Path
+from openai import OpenAI
 import io
+import os
+import json
+import torch
 
 
-# =========================================================
+# ============================================================
 # APP CONFIGURATION
-# =========================================================
+# ============================================================
 
 app = FastAPI(
     title="Construction PPE Detection & Reasoning API",
-    description="RT-DETR based PPE detection with handwritten reasoning",
-    version="1.0.0"
+    description=(
+        "RT-DETR based construction PPE detection with "
+        "handwritten reasoning"
+    ),
+    version="2.0.0"
 )
 
-MODEL_PATH = Path(__file__).resolve().parent.parent / "models" / "best.pt"
 
-# Load trained RT-DETR model
+# ============================================================
+# MODEL CONFIGURATION
+# ============================================================
+
+MODEL_PATH = (
+    Path(__file__).resolve().parent.parent
+    / "models"
+    / "best.pt"
+)
+
+if not MODEL_PATH.exists():
+    raise FileNotFoundError(
+        f"Model weights not found at: {MODEL_PATH}"
+    )
+
 model = RTDETR(str(MODEL_PATH))
+
+# GPU if available, otherwise CPU
+DEVICE = 0 if torch.cuda.is_available() else "cpu"
 
 # Confidence threshold for reasoning
 REASONING_CONFIDENCE = 0.50
 
 
-# =========================================================
+# ============================================================
+# LLM CONFIGURATION
+# ============================================================
+
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+
+llm_client = (
+    OpenAI(api_key=OPENAI_API_KEY)
+    if OPENAI_API_KEY
+    else None
+)
+
+LLM_MODEL = "gpt-5.6-luna"
+
+
+# ============================================================
 # DETECTION FUNCTION
-# =========================================================
+# ============================================================
 
 def run_detection(image):
+    """
+    Run RT-DETR and return structured detections.
+    """
 
     results = model.predict(
         source=image,
         imgsz=640,
         conf=0.25,
-        device=0,
+        device=DEVICE,
         verbose=False
     )
 
@@ -66,25 +107,35 @@ def run_detection(image):
     return detections
 
 
-# =========================================================
+# ============================================================
 # HANDWRITTEN INTENT ROUTER
-# =========================================================
+# ============================================================
 
 def route_question(question):
+    """
+    Single handwritten decision layer.
+
+    Determines whether the question requires
+    image/object detection.
+    """
 
     q = question.lower().strip()
 
-    # Visual questions
     visual_keywords = [
+
+        # Counting
         "how many",
         "count",
         "number of",
+
+        # Presence
         "is there",
         "are there",
         "do you see",
         "does the image",
-        "detect",
         "visible",
+
+        # PPE / objects
         "wearing",
         "helmet",
         "vest",
@@ -93,30 +144,42 @@ def route_question(question):
         "goggle",
         "person",
         "people",
-        "worker"
+        "worker",
+
+        # Object reasoning
+        "most common",
+        "common object",
+        "which object",
+        "what objects",
+        "what object",
+        "most frequent"
     ]
 
     if any(keyword in q for keyword in visual_keywords):
         return "visual"
 
-    # Everything else is unsupported
     return "unsupported"
 
 
-# =========================================================
+# ============================================================
 # FIND TARGET CLASS
-# =========================================================
+# ============================================================
 
 def find_class(question):
 
     q = question.lower()
 
     # Person
-    if "person" in q or "people" in q or "worker" in q:
+    if (
+        "person" in q
+        or "people" in q
+        or "worker" in q
+    ):
         return "Person"
 
     # Helmet
     if "helmet" in q:
+
         if (
             "without" in q
             or "no helmet" in q
@@ -133,6 +196,7 @@ def find_class(question):
 
     # Gloves
     if "glove" in q:
+
         if (
             "without" in q
             or "no glove" in q
@@ -144,6 +208,7 @@ def find_class(question):
 
     # Goggles
     if "goggle" in q:
+
         if (
             "without" in q
             or "no goggle" in q
@@ -155,6 +220,7 @@ def find_class(question):
 
     # Boots
     if "boot" in q:
+
         if (
             "without" in q
             or "no boot" in q
@@ -167,70 +233,112 @@ def find_class(question):
     return None
 
 
-# =========================================================
-# DETERMINISTIC REASONING
-# =========================================================
+# ============================================================
+# RELIABLE DETECTIONS
+# ============================================================
 
-def reason_over_detections(question, detections):
+def get_reliable_detections(detections):
 
-    q = question.lower().strip()
-
-    # Only use sufficiently confident detections
-    reliable = [
+    return [
         detection
         for detection in detections
         if detection["confidence"] >= REASONING_CONFIDENCE
     ]
 
 
-    # -----------------------------------------------------
-    # 1. HELMET COMPLIANCE
-    # -----------------------------------------------------
+# ============================================================
+# DETERMINISTIC FALLBACK REASONING
+# ============================================================
 
-    helmet_violation = (
-        "without helmet" in q
-        or "without a helmet" in q
-        or "no helmet" in q
-        or "no-helmet" in q
-        or "not wearing helmet" in q
-        or "not wearing a helmet" in q
-        or (
-            "anyone without" in q
-            and "helmet" in q
-        )
-    )
+def deterministic_reasoning(question, detections):
+    """
+    Safe fallback reasoning.
 
-    if helmet_violation:
+    This is used when:
+    - OpenAI is unavailable
+    - OpenAI quota is exhausted
+    - LLM call fails
 
-        matching = [
-            detection
-            for detection in reliable
-            if detection["class"] == "no_helmet"
-        ]
+    It reasons only from detector output.
+    """
 
-        if matching:
+    q = question.lower().strip()
 
-            return {
-                "answer": (
-                    f"Yes. I detected {len(matching)} "
-                    f"no-helmet instance(s)."
-                ),
-                "evidence": matching
-            }
+    reliable = get_reliable_detections(detections)
+
+    # --------------------------------------------------------
+    # NO RELIABLE DETECTIONS
+    # --------------------------------------------------------
+
+    if not reliable:
 
         return {
             "answer": (
-                "Insufficient information: I did not find a "
-                "sufficiently confident explicit no-helmet detection, "
-                "so I will not assume that everyone is wearing a helmet."
+                "Insufficient information: no sufficiently "
+                "confident detections were available."
             ),
-            "evidence": []
+            "evidence": [],
+            "source": "deterministic_guardrail"
         }
 
 
-    # -----------------------------------------------------
-    # 2. COUNT QUESTIONS
-    # -----------------------------------------------------
+    # --------------------------------------------------------
+    # PPE VIOLATION QUESTIONS
+    # --------------------------------------------------------
+
+    violation_classes = [
+        "no_helmet",
+        "no_goggle",
+        "no_gloves",
+        "no_boots"
+    ]
+
+    for violation_class in violation_classes:
+
+        readable = violation_class.replace("_", " ")
+
+        if (
+            violation_class == "no_helmet"
+            and "helmet" in q
+            and (
+                "without" in q
+                or "no helmet" in q
+                or "no-helmet" in q
+                or "not wearing" in q
+            )
+        ):
+
+            matching = [
+                d for d in reliable
+                if d["class"] == violation_class
+            ]
+
+            if matching:
+
+                return {
+                    "answer": (
+                        f"Yes. I detected {len(matching)} "
+                        f"{readable} instance(s)."
+                    ),
+                    "evidence": matching,
+                    "source": "deterministic_fallback"
+                }
+
+            return {
+                "answer": (
+                    "Insufficient information: I did not find "
+                    "a sufficiently confident explicit "
+                    "no-helmet detection, so I will not assume "
+                    "that everyone is wearing a helmet."
+                ),
+                "evidence": [],
+                "source": "deterministic_guardrail"
+            }
+
+
+    # --------------------------------------------------------
+    # COUNT QUESTIONS
+    # --------------------------------------------------------
 
     is_count_question = any(
         keyword in q
@@ -249,34 +357,49 @@ def reason_over_detections(question, detections):
 
             return {
                 "answer": (
-                    "Insufficient information: I can count supported "
-                    "PPE and person classes, but I could not determine "
-                    "which object you are asking about."
+                    "Insufficient information: I can count "
+                    "supported PPE and person classes, but "
+                    "I could not determine which object you "
+                    "are asking about."
                 ),
-                "evidence": []
+                "evidence": [],
+                "source": "deterministic_fallback"
             }
 
         matching = [
-            detection
-            for detection in reliable
-            if detection["class"] == target_class
+            d for d in reliable
+            if d["class"] == target_class
         ]
 
-        count = len(matching)
+        # IMPORTANT:
+        # No detection is NOT proof of zero objects.
+        if not matching:
+
+            return {
+                "answer": (
+                    "Insufficient information: no sufficiently "
+                    "confident detection was found for the "
+                    "requested class."
+                ),
+                "evidence": [],
+                "source": "deterministic_guardrail"
+            }
 
         readable_name = target_class.replace("_", " ")
 
         return {
             "answer": (
-                f"I detected {count} {readable_name}."
+                f"I detected {len(matching)} "
+                f"{readable_name}."
             ),
-            "evidence": matching
+            "evidence": matching,
+            "source": "deterministic_fallback"
         }
 
 
-    # -----------------------------------------------------
-    # 3. PRESENCE QUESTIONS
-    # -----------------------------------------------------
+    # --------------------------------------------------------
+    # PRESENCE QUESTIONS
+    # --------------------------------------------------------
 
     is_presence_question = any(
         keyword in q
@@ -296,16 +419,16 @@ def reason_over_detections(question, detections):
 
             return {
                 "answer": (
-                    "Insufficient information: the requested object "
-                    "is not a supported detection class."
+                    "Insufficient information: the requested "
+                    "object is not a supported detection class."
                 ),
-                "evidence": []
+                "evidence": [],
+                "source": "deterministic_fallback"
             }
 
         matching = [
-            detection
-            for detection in reliable
-            if detection["class"] == target_class
+            d for d in reliable
+            if d["class"] == target_class
         ]
 
         readable_name = target_class.replace("_", " ")
@@ -317,56 +440,227 @@ def reason_over_detections(question, detections):
                     f"Yes. I detected {len(matching)} "
                     f"{readable_name}."
                 ),
-                "evidence": matching
+                "evidence": matching,
+                "source": "deterministic_fallback"
             }
 
-        # Absence of detection is NOT proof of absence
         return {
             "answer": (
-                f"I cannot confidently determine whether a "
-                f"{readable_name} is present because no sufficiently "
-                f"confident detection was found."
+                f"I cannot confidently determine whether "
+                f"a {readable_name} is present because no "
+                f"sufficiently confident detection was found."
             ),
-            "evidence": []
+            "evidence": [],
+            "source": "deterministic_guardrail"
         }
 
 
-    # -----------------------------------------------------
-    # 4. UNSUPPORTED VISUAL QUESTION
-    # -----------------------------------------------------
+    # --------------------------------------------------------
+    # MOST COMMON OBJECT
+    # --------------------------------------------------------
+
+    if (
+        "most common" in q
+        or "most frequent" in q
+        or "common object" in q
+        or "which object" in q
+    ):
+
+        counts = {}
+
+        for detection in reliable:
+
+            class_name = detection["class"]
+
+            counts[class_name] = (
+                counts.get(class_name, 0) + 1
+            )
+
+        if not counts:
+
+            return {
+                "answer": "Insufficient information.",
+                "evidence": [],
+                "source": "deterministic_guardrail"
+            }
+
+        most_common_class = max(
+            counts,
+            key=counts.get
+        )
+
+        most_common_count = counts[most_common_class]
+
+        return {
+            "answer": (
+                f"The most common detected object is "
+                f"{most_common_class} with "
+                f"{most_common_count} detection(s)."
+            ),
+            "evidence": reliable,
+            "source": "deterministic_fallback"
+        }
+
+
+    # --------------------------------------------------------
+    # GENERAL FALLBACK
+    # --------------------------------------------------------
 
     return {
         "answer": (
-            "Insufficient information: I cannot reliably answer "
-            "that question from the detector's structured outputs."
+            "Insufficient information: I cannot reliably "
+            "answer that question from the detector's "
+            "structured outputs."
         ),
-        "evidence": []
+        "evidence": [],
+        "source": "deterministic_guardrail"
     }
 
 
-# =========================================================
+# ============================================================
+# LLM REASONING
+# ============================================================
+
+def reason_with_llm(question, detections):
+    """
+    Try LLM reasoning first.
+
+    If OpenAI is unavailable or the request fails,
+    safely fall back to deterministic reasoning.
+    """
+
+    # --------------------------------------------------------
+    # LLM NOT AVAILABLE
+    # --------------------------------------------------------
+
+    if llm_client is None:
+
+        return deterministic_reasoning(
+            question,
+            detections
+        )
+
+
+    # --------------------------------------------------------
+    # STRUCTURED EVIDENCE
+    # --------------------------------------------------------
+
+    evidence = [
+        {
+            "class": detection["class"],
+            "confidence": detection["confidence"],
+            "bbox": detection["bbox"]
+        }
+        for detection in detections
+    ]
+
+
+    # --------------------------------------------------------
+    # PROMPT
+    # --------------------------------------------------------
+
+    prompt = f"""
+You are the reasoning layer of a construction PPE
+object detection system.
+
+Answer ONLY from the detector evidence below.
+
+User question:
+{question}
+
+Detector evidence:
+{json.dumps(evidence, indent=2)}
+
+Rules:
+
+1. Never invent detections.
+
+2. Never claim an object is present unless it appears
+   in the detector evidence.
+
+3. Never infer that an object is absent because it was
+   not detected.
+
+4. PPE violation classes such as no_helmet, no_goggle,
+   no_gloves and no_boots require explicit detector
+   evidence.
+
+5. If the evidence is insufficient, answer:
+   "Insufficient information."
+
+6. For "how many" questions, count the matching
+   detections.
+
+7. For "most common" questions, count detector classes
+   and identify the class with the highest count.
+
+8. Keep the answer concise and in plain English.
+"""
+
+
+    # --------------------------------------------------------
+    # CALL OPENAI
+    # --------------------------------------------------------
+
+    try:
+
+        response = llm_client.responses.create(
+            model=LLM_MODEL,
+            input=prompt,
+            max_output_tokens=120
+        )
+
+        answer = response.output_text.strip()
+
+        if answer:
+
+            return {
+                "answer": answer,
+                "evidence": detections,
+                "source": "llm"
+            }
+
+    except Exception:
+        # OpenAI quota / network / API errors
+        # are handled safely by fallback reasoning.
+        pass
+
+
+    # --------------------------------------------------------
+    # FALLBACK
+    # --------------------------------------------------------
+
+    return deterministic_reasoning(
+        question,
+        detections
+    )
+
+
+# ============================================================
 # ROOT ENDPOINT
-# =========================================================
+# ============================================================
 
 @app.get("/")
 def root():
 
     return {
         "message": "Construction PPE Detection & Reasoning API",
-        "status": "running"
+        "status": "running",
+        "model": "RT-DETR",
+        "device": str(DEVICE),
+        "llm_enabled": llm_client is not None
     }
 
 
-# =========================================================
+# ============================================================
 # DETECTION ENDPOINT
-# =========================================================
+# ============================================================
 
 @app.post("/detect")
 async def detect(
     file: UploadFile = File(...)
 ):
 
-    # Validate image
     if (
         not file.content_type
         or not file.content_type.startswith("image/")
@@ -376,6 +670,7 @@ async def detect(
             status_code=400,
             detail="Please upload an image file."
         )
+
 
     try:
 
@@ -395,6 +690,7 @@ async def detect(
             "count": len(detections)
         }
 
+
     except Exception as error:
 
         raise HTTPException(
@@ -403,9 +699,9 @@ async def detect(
         )
 
 
-# =========================================================
+# ============================================================
 # REASONING ENDPOINT
-# =========================================================
+# ============================================================
 
 @app.post("/reason")
 async def reason(
@@ -413,7 +709,6 @@ async def reason(
     file: UploadFile = File(...)
 ):
 
-    # Validate image
     if (
         not file.content_type
         or not file.content_type.startswith("image/")
@@ -424,18 +719,19 @@ async def reason(
             detail="Please upload an image file."
         )
 
+
     try:
 
-        # -------------------------------------------------
+        # ====================================================
         # STEP 1: HANDWRITTEN ROUTING
-        # -------------------------------------------------
+        # ====================================================
 
         intent = route_question(question)
 
 
-        # -------------------------------------------------
+        # ====================================================
         # STEP 2: UNSUPPORTED QUESTION
-        # -------------------------------------------------
+        # ====================================================
 
         if intent == "unsupported":
 
@@ -447,13 +743,14 @@ async def reason(
                     "Insufficient information: this question "
                     "cannot be answered from the PPE detector."
                 ),
-                "detections_used": []
+                "detections_used": [],
+                "reasoning_source": "handwritten_router"
             }
 
 
-        # -------------------------------------------------
+        # ====================================================
         # STEP 3: READ IMAGE
-        # -------------------------------------------------
+        # ====================================================
 
         contents = await file.read()
 
@@ -462,33 +759,58 @@ async def reason(
         ).convert("RGB")
 
 
-        # -------------------------------------------------
-        # STEP 4: RUN RT-DETR
-        # -------------------------------------------------
+        # ====================================================
+        # STEP 4: RT-DETR
+        # ====================================================
 
         detections = run_detection(image)
 
 
-        # -------------------------------------------------
-        # STEP 5: REASON OVER STRUCTURED OUTPUT
-        # -------------------------------------------------
+        # ====================================================
+        # STEP 5: CONFIDENCE GUARDRAIL
+        # ====================================================
 
-        reasoning = reason_over_detections(
-            question,
+        reliable_detections = get_reliable_detections(
             detections
         )
 
+        if not reliable_detections:
 
-        # -------------------------------------------------
-        # STEP 6: RETURN ANSWER
-        # -------------------------------------------------
+            return {
+                "success": True,
+                "question": question,
+                "intent": intent,
+                "answer": (
+                    "Insufficient information: no sufficiently "
+                    "confident detections were available to "
+                    "answer the question."
+                ),
+                "detections_used": [],
+                "reasoning_source": "confidence_guardrail"
+            }
+
+
+        # ====================================================
+        # STEP 6: LLM + SAFE FALLBACK
+        # ====================================================
+
+        reasoning = reason_with_llm(
+            question,
+            reliable_detections
+        )
+
+
+        # ====================================================
+        # STEP 7: FINAL RESPONSE
+        # ====================================================
 
         return {
             "success": True,
             "question": question,
             "intent": intent,
             "answer": reasoning["answer"],
-            "detections_used": reasoning["evidence"]
+            "detections_used": reasoning["evidence"],
+            "reasoning_source": reasoning["source"]
         }
 
 

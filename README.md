@@ -1,75 +1,59 @@
+# Constrained Object Detection & Reasoning API
 
-# Construction PPE Detection & Reasoning API
+A construction-site PPE detection and reasoning API built using **RT-DETR**, **FastAPI**, and a lightweight handwritten reasoning router.
 
-An RT-DETR-L based object detection and reasoning API for construction-site PPE monitoring.
+The system detects PPE and PPE violations from images and answers natural-language questions using structured detection results with an explicit confidence-based guardrail.
 
-## 1. Problem
+---
 
-Construction safety monitoring requires identifying workers and their personal protective equipment (PPE).
+## 1. Problem Statement
 
-This project detects PPE objects and provides a natural-language reasoning endpoint that answers questions using the detector's structured outputs.
+Construction sites require workers to use personal protective equipment (PPE) such as helmets, gloves, vests, boots, and goggles.
 
-## 2. Model
+The objective of this project is to build a constrained object-detection system that:
 
-Model: RT-DETR-L
+1. Detects PPE-related objects and non-compliance conditions.
+2. Exposes the detector through a FastAPI endpoint.
+3. Accepts natural-language questions about an image.
+4. Uses a handwritten intent-routing layer to decide whether object detection is required.
+5. Reasons over structured detector outputs such as classes, bounding boxes, confidence scores, and counts.
+6. Explicitly returns an insufficient-information response instead of guessing when the detector does not provide reliable evidence.
 
-Training:
+---
 
-- Epochs: 30
-- Image size: 640
-- Batch size: 4
-- GPU: NVIDIA Tesla T4
-- Early stopping patience: 8
+## 2. Solution Overview
 
-## 3. Dataset
+The system contains two API endpoints:
 
-Dataset: Construction-PPE
+### `/detect`
 
-The dataset contains PPE and non-compliance classes including:
+Accepts an image and returns detected:
 
-- helmet
-- gloves
-- vest
-- boots
-- goggles
-- none
-- Person
-- no_helmet
-- no_goggle
-- no_gloves
-- no_boots
+- Object/class name
+- Bounding box
+- Confidence score
+- Total detection count
 
-Dataset configuration is included as:
+### `/reason`
 
-`construction-ppe.yaml`
+Accepts:
 
-## 4. Architecture
+- An image
+- A natural-language question
+
+The handwritten router first determines whether the question is related to visual information.
+
+If visual reasoning is required:
 
 ```text
-                 Input Image
-                      |
-                      v
-                  RT-DETR-L
-                      |
-                      v
-             Structured Detections
-                      |
-             +--------+--------+
-             |                 |
-             v                 v
-          /detect           /reason
-                               |
-                               v
-                    Handwritten Intent Router
-                               |
-                               v
-                    RT-DETR Structured Output
-                               |
-                               v
-                    Deterministic Reasoning
-                               |
-                               v
-                     Confidence Guardrail
-                               |
-                               v
-                       Natural Language
+Image
+  ↓
+RT-DETR
+  ↓
+Structured detections
+  ↓
+Confidence filtering
+  ↓
+Reasoning layer
+  ↓
+Natural-language answer
